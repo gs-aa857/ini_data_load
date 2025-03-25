@@ -7,7 +7,7 @@ import io
 # ------------------------------
 # Set page config and apply dark theme styling
 # ------------------------------
-st.set_page_config(page_title="Initiative Data Downloader")
+#st.set_page_config(page_title="Initiative Data Downloader")
 # Basic dark theme CSS for the Streamlit app
 st.markdown(
     """
@@ -23,6 +23,9 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
+st.image("Initiative_RGB_Blue.png", use_container_width=True)
+st.title("Initiative Data Downloader")
 
 # ------------------------------
 # Snowflake Connection (secrets stored in .streamlit/secrets.toml)
@@ -112,7 +115,6 @@ if not st.session_state.logged_in:
 # Main App Interface (after succesful login)
 # ------------------------------
 if st.session_state.logged_in:
-    st.title("Initiative Data Downloader")
     
     st.success(f"Welcome, {st.session_state.email}!")
 
