@@ -135,7 +135,7 @@ if st.session_state.logged_in:
     # ------------------------------
     # Data Retrieval Button and Query Execution
     # ------------------------------
-    if st.button("Download Data"):
+    if st.button("Get Data"):
         # Build the list of columns to retrieve: always include the hidden columns plus the user-selected ones.
         query = f"""
         SELECT *
