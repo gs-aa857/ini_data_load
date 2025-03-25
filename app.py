@@ -25,7 +25,7 @@ st.markdown(
 )
 
 st.image("Initiative_RGB_Blue.png", use_container_width=True)
-st.title("Initiative Data Downloader")
+st.title("Initiative EE Data Downloader")
 
 # ------------------------------
 # Snowflake Connection (secrets stored in .streamlit/secrets.toml)
