@@ -7,7 +7,7 @@ import io
 # ------------------------------
 # Set page config and apply dark theme styling
 # ------------------------------
-st.set_page_config(page_title="Initiative Data Downloader", layout="wide")
+st.set_page_config(page_title="Initiative Data Downloader")
 # Basic dark theme CSS for the Streamlit app
 st.markdown(
     """
@@ -95,13 +95,13 @@ if "logged_in" not in st.session_state:
 
 # Login form
 if not st.session_state.logged_in:
-    email = st.text_input("Email")
-    password = st.text_input("Password", type="password")
+    email = (st.text_input("Email")).lower()
+    password = st.text_input("Password", type="password").lower()
     
     if st.button("Login"):
         user_data = users.get(email)  # Get user data if email exists
         
-        if user_data and user_data["password"] == password:
+        if user_data and user_data["password"].lower() == password:
             st.session_state.logged_in = True
             st.session_state.email = email
             st.rerun()  # Refresh the app
