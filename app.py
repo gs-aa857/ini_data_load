@@ -180,7 +180,6 @@ if st.session_state.logged_in:
             st.session_state["df"] = df
             
             st.success("Data retrieved successfully!")
-            st.dataframe(df)
 
         except Exception as e:
             st.error(f"Error retrieving data: {e}")
@@ -188,12 +187,16 @@ if st.session_state.logged_in:
     if "df" in st.session_state:
         df = st.session_state["df"]
         
+        st.dataframe(df.head(100))
+        
         # ------------------------------
         # Download Format Selection: CSV or Excel
         # ------------------------------
-        download_format = st.radio("Select Download Format", options=["Excel", "CSV"])
+        download_format = st.radio(f"Select Download Format{'' if df.shape[0] < 100000 else ' (generating Excel for large datasets can take time)'}", options=["Excel", "CSV"], index= 0 if df.shape[0] < 100000 else 1)
+        
         if download_format == "CSV":
-            csv_data = df.to_csv(index=False).encode('utf-8')
+            with st.spinner("Generating CSV file..."):
+                csv_data = df.to_csv(index=False).encode('utf-8')
             st.download_button(
                 label="Download as CSV",
                 data=csv_data,
@@ -203,12 +206,11 @@ if st.session_state.logged_in:
             
         else:
             # Write DataFrame to an in-memory Excel file
-            towrite = io.BytesIO()
-            with pd.ExcelWriter(towrite, engine="openpyxl") as writer:  # Use openpyxl instead of xlsxwriter
-                df.to_excel(writer, index=False, sheet_name="WeatherData")
-            # with pd.ExcelWriter(towrite, engine='xlsxwriter') as writer:
-            #     df.to_excel(writer, index=False, sheet_name="WeatherData")
-            #     writer.save()
+            with st.spinner("Generating Excel file..."):
+                towrite = io.BytesIO()
+                with pd.ExcelWriter(towrite, engine="openpyxl") as writer:  # Use openpyxl instead of xlsxwriter
+                    df.to_excel(writer, index=False, sheet_name="WeatherData")
+ 
             towrite.seek(0)
             st.download_button(
                 label="Download as Excel",
