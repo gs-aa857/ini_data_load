@@ -123,14 +123,39 @@ if st.session_state.logged_in:
     
     today = datetime.date.today()
     last_month = today.replace(day=1) - datetime.timedelta(days=1)
-    start_date = subtract_month(last_month)
-    end_date = last_month
-    date_range = st.date_input(
-        "Select Date Range",
-        value=(start_date, end_date),
-        min_value=datetime.date(2019, 1, 1),
+    default_start_date = subtract_month(last_month)
+    default_end_date = last_month
+    
+    # Session state to store selected dates
+    if "start_date" not in st.session_state:
+        st.session_state.start_date = default_start_date
+    if "end_date" not in st.session_state:
+        st.session_state.end_date = default_end_date
+    
+    # Display date selectors with dynamic min/max values
+    start_date = st.date_input(
+        "Select Start Date", 
+        value=st.session_state.start_date, 
+        min_value=datetime.date(2019, 1, 1), 
+        max_value=st.session_state.end_date  # Ensures start_date is not after end_date
+    )
+    
+    end_date = st.date_input(
+        "Select End Date", 
+        value=st.session_state.end_date, 
+        min_value=start_date,  # Ensures end_date is not before start_date
         max_value=today
     )
+    
+    # Update session state
+    st.session_state.start_date = start_date
+    st.session_state.end_date = end_date
+    
+    # Validation: Show message if selection is invalid
+    if start_date > end_date:
+        st.error("Start Date cannot be later than End Date. Please select a valid range.")
+    else:
+        st.success(f"Selected date range: **{start_date}** to **{end_date}**")
     
     st.write(f"You have selected: **{selected_view}**")
     
@@ -142,7 +167,7 @@ if st.session_state.logged_in:
         query = f"""
         SELECT *
         FROM {st.secrets['snowflake']['database']}.{st.secrets['snowflake']['schema']}.{views[selected_view]}
-        WHERE TO_DATE(AD_DATE, 'DD.MM.YYYY') BETWEEN '{date_range[0]}' AND '{date_range[1]}'
+        WHERE TO_DATE(AD_DATE, 'DD.MM.YYYY') BETWEEN '{start_date}' AND '{end_date}'
         ORDER BY TO_DATE(AD_DATE, 'DD.MM.YYYY')
         """
         try:
@@ -172,7 +197,7 @@ if st.session_state.logged_in:
             st.download_button(
                 label="Download as CSV",
                 data=csv_data,
-                file_name="{selected_view}.csv",
+                file_name=f"{selected_view}.csv",
                 mime="text/csv"
             )
             
@@ -188,6 +213,6 @@ if st.session_state.logged_in:
             st.download_button(
                 label="Download as Excel",
                 data=towrite,
-                file_name="{selected_view}.xlsx",
+                file_name=f"{selected_view}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
