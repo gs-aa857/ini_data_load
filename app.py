@@ -33,18 +33,15 @@ st.title("Initiative EE Data Downloader")
 @st.cache_resource(show_spinner=False)
 def get_connection():
     try:
-        private_key_p8 = st.secrets["snowflake"]["private_key"]
-        # private_key_base64 = st.secrets["snowflake"]["private_key"]
-        # private_key_p8 = base64.b64decode(private_key_base64).decode("utf-8")
         
         return snowflake.connector.connect(
             user=st.secrets["snowflake"]["user"],
-            # password=st.secrets["snowflake"]["password"],
+            password=st.secrets["snowflake"]["password"],
             account=st.secrets["snowflake"]["account"],
             warehouse=st.secrets["snowflake"]["warehouse"],
-            database=st.secrets["snowflake"]["database"],
-            schema=st.secrets["snowflake"]["schema"],
-            private_key=private_key_p8
+            database=st.secrets["snowflake"]["database"]#,
+            #schema=st.secrets["snowflake"]["schema"],
+            #private_key=st.secrets["snowflake"]["private_key"]
         )
     except Exception as e:
         st.error(f"Failed to connect to Snowflake: {e}")
@@ -166,7 +163,7 @@ if st.session_state.logged_in:
         # Build the list of columns to retrieve: always include the hidden columns plus the user-selected ones.
         query = f"""
         SELECT *
-        FROM {st.secrets['snowflake']['database']}.{st.secrets['snowflake']['schema']}.{views[selected_view]}
+        FROM {st.secrets['snowflake']['database']}.{views[selected_view]}
         WHERE TO_DATE(AD_DATE, 'DD.MM.YYYY') BETWEEN '{start_date}' AND '{end_date}'
         ORDER BY TO_DATE(AD_DATE, 'DD.MM.YYYY')
         """
