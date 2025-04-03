@@ -2,6 +2,7 @@ import streamlit as st
 import snowflake.connector
 import pandas as pd
 import datetime
+import time
 import io
 
 # ------------------------------
@@ -27,6 +28,7 @@ st.markdown(
 st.image("Initiative_RGB_Blue.png", use_container_width=True)
 st.title("Initiative EE Data Downloader")
 
+
 # ------------------------------
 # Snowflake Connection (secrets stored in .streamlit/secrets.toml)
 # ------------------------------
@@ -36,32 +38,82 @@ def get_connection():
         
         return snowflake.connector.connect(
             user=st.secrets["snowflake"]["user"],
-            password=st.secrets["snowflake"]["password"],
+            #password=st.secrets["snowflake"]["password"],
             account=st.secrets["snowflake"]["account"],
             warehouse=st.secrets["snowflake"]["warehouse"],
-            database=st.secrets["snowflake"]["database"]#,
+            database=st.secrets["snowflake"]["database"],
             #schema=st.secrets["snowflake"]["schema"],
-            #private_key=st.secrets["snowflake"]["private_key"]
+            private_key=st.secrets["snowflake"]["private_key"]
         )
     except Exception as e:
-        st.error(f"Failed to connect to Snowflake: {e}")
+        st.error("Failed to connect to database.")
+        st.exception(e)
         return None
     
 # ------------------------------
-# Get column names from a table (returns list of column names)
+# Log query execution and errors
 # ------------------------------
-def get_table_columns(table_name):
-    query = f"SELECT * FROM {st.secrets['snowflake']['database']}.{st.secrets['snowflake']['schema']}.{table_name} LIMIT 0"
+def log_query(user_id, view_id, start_date, end_date, number_of_rows, query_duration):
     try:
         conn = get_connection()
-        cur = conn.cursor()
-        cur.execute(query)
-        cols = [desc[0] for desc in cur.description]
-        cur.close()
-        return cols
+        query = f"""
+        INSERT INTO {st.secrets['snowflake']['schema']}.USER_LOGS (user_id, view_id, action_timestamp, start_date, end_date, number_of_rows, query_duration)
+        VALUES (%s, %s, CURRENT_TIMESTAMP(), %s, %s, %s, %s);
+        """
+        cursor = conn.cursor()
+        cursor.execute(query, (user_id, view_id, start_date, end_date, number_of_rows, query_duration))
+        conn.commit()
+        cursor.close()
     except Exception as e:
-        st.error(f"Error retrieving columns: {e}")
-        return []
+        st.error("Error accessing database.")
+        st.exception(e)    
+        
+# ------------------------------
+# Get user data from Snowflake
+# ------------------------------
+def get_user_data(email):
+    try:
+        conn = get_connection()
+        query = f"""
+        SELECT user_id, password FROM {st.secrets['snowflake']['schema']}.USERS WHERE username = '{email}'
+        """
+        cursor = conn.cursor()
+        cursor.execute(query)
+        user_data = cursor.fetchone()
+        cursor.close()
+        return user_data
+    except Exception as e:
+        st.error("Error identifying user.")
+        st.exception(e)
+        return None
+
+# ------------------------------
+# Get user data from Snowflake
+# ------------------------------
+def get_user_views(email):
+    try:
+        conn = get_connection()
+        query = f"""
+        SELECT VIEWS.view_name, VIEWS.view_id, CONCAT(VIEWS.SCHEMA_NAME,'.',VIEWS.DB_VIEW_NAME) AS address
+        FROM {st.secrets['snowflake']['schema']}.USER_VIEWS 
+        JOIN {st.secrets['snowflake']['schema']}.USERS ON USER_VIEWS.user_id = USERS.user_id
+        JOIN {st.secrets['snowflake']['schema']}.VIEWS ON USER_VIEWS.view_id = VIEWS.view_id
+        WHERE LOWER(USERS.username) = %s
+        """
+        cursor = conn.cursor()
+        cursor.execute(query, email)
+        views = cursor.fetchall()
+        cursor.close()
+
+        if views:
+            return {view[0]: [view[1],view[2]] for view in views}  # {view_name: address}
+        else:
+            return {}
+
+    except Exception as e:
+        st.error("Error accessing available views.")
+        st.exception(e)
+        return {}
 
 # ------------------------------
 # Substract one month using datetime
@@ -96,17 +148,20 @@ if "logged_in" not in st.session_state:
 # Login form
 if not st.session_state.logged_in:
     email = (st.text_input("Email")).lower()
-    password = st.text_input("Password", type="password").lower()
+    password = st.text_input("Password", type="password")
     
     if st.button("Login"):
-        user_data = users.get(email)  # Get user data if email exists
-        
-        if user_data and user_data["password"].lower() == password:
-            st.session_state.logged_in = True
-            st.session_state.email = email
-            st.rerun()  # Refresh the app
-        else:
-            st.error("Invalid email or password!")
+        try:
+            
+            if get_user_data(email)[1] == password:
+                st.session_state.logged_in = True
+                st.session_state.email = email
+                st.rerun()  # Refresh the app
+            else:
+                st.error("Invalid email or password!")
+        except Exception as e:
+            st.error("Error during login.")
+            st.exception(e)
 
 # ------------------------------
 # Main App Interface (after succesful login)
@@ -115,8 +170,8 @@ if st.session_state.logged_in:
     
     st.success(f"Welcome, {st.session_state.email}!")
 
-    user_views = users[st.session_state.email]["views"]
-    selected_view = st.selectbox("Select a View", user_views)
+    user_views = get_user_views(st.session_state.email)
+    selected_view = st.selectbox("Select a View", user_views.keys())
     
     today = datetime.date.today()
     last_month = today.replace(day=1) - datetime.timedelta(days=1)
@@ -151,10 +206,6 @@ if st.session_state.logged_in:
     # Validation: Show message if selection is invalid
     if start_date > end_date:
         st.error("Start Date cannot be later than End Date. Please select a valid range.")
-    else:
-        st.success(f"Selected date range: **{start_date}** to **{end_date}**")
-    
-    st.write(f"You have selected: **{selected_view}**")
     
     # ------------------------------
     # Data Retrieval Button and Query Execution
@@ -163,20 +214,31 @@ if st.session_state.logged_in:
         # Build the list of columns to retrieve: always include the hidden columns plus the user-selected ones.
         query = f"""
         SELECT *
-        FROM {st.secrets['snowflake']['database']}.{views[selected_view]}
+        FROM {st.secrets['snowflake']['database']}.{user_views[selected_view][1]}
         WHERE TO_DATE(AD_DATE, 'DD.MM.YYYY') BETWEEN '{start_date}' AND '{end_date}'
         ORDER BY TO_DATE(AD_DATE, 'DD.MM.YYYY')
         """
         try:
-            with st.spinner("Querying Snowflake..."):
+            with st.spinner("Querying Database..."):
                 conn = get_connection()
+                start_time = time.time()  # Start before query submission
                 df = pd.read_sql(query, conn)
-                #conn.close()
+                end_time = time.time()
             
             # Store the DataFrame in session state to prevent re-querying
             st.session_state["df"] = df
             
             st.success("Data retrieved successfully!")
+            
+            # Log query details to the database
+            log_query(
+                user_id=get_user_data(st.session_state.email)[0],
+                view_id=user_views[selected_view][0],
+                start_date=start_date,
+                end_date=end_date,
+                query_duration=end_time - start_time,
+                number_of_rows=df.shape[0]
+            )
 
         except Exception as e:
             st.error(f"Error retrieving data: {e}")
