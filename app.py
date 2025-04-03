@@ -47,7 +47,7 @@ def get_connection():
         )
     except Exception as e:
         st.error("Failed to connect to database.")
-        st.exception(e)
+        # st.exception(e)
         return None
     
 # ------------------------------
@@ -66,7 +66,7 @@ def log_query(user_id, view_id, start_date, end_date, number_of_rows, query_dura
         cursor.close()
     except Exception as e:
         st.error("Error accessing database.")
-        st.exception(e)    
+        # st.exception(e)    
         
 # ------------------------------
 # Get user data from Snowflake
@@ -84,7 +84,7 @@ def get_user_data(email):
         return user_data
     except Exception as e:
         st.error("Error identifying user.")
-        st.exception(e)
+        # st.exception(e)
         return None
 
 # ------------------------------
@@ -112,7 +112,7 @@ def get_user_views(email):
 
     except Exception as e:
         st.error("Error accessing available views.")
-        st.exception(e)
+        # st.exception(e)
         return {}
 
 # ------------------------------
@@ -161,7 +161,7 @@ if not st.session_state.logged_in:
                 st.error("Invalid email or password!")
         except Exception as e:
             st.error("Error during login.")
-            st.exception(e)
+            # st.exception(e)
 
 # ------------------------------
 # Main App Interface (after succesful login)
@@ -241,7 +241,7 @@ if st.session_state.logged_in:
             )
 
         except Exception as e:
-            st.error(f"Error retrieving data: {e}")
+            st.error(f"Error retrieving data.")
             
     if "df" in st.session_state:
         df = st.session_state["df"]
