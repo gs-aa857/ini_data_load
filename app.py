@@ -160,7 +160,7 @@ if not st.session_state.logged_in:
             else:
                 st.error("Invalid email or password!")
         except Exception as e:
-            st.error("Error during login.")
+            st.error("Invalid email or password!")
             # st.exception(e)
 
 # ------------------------------
