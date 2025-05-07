@@ -242,6 +242,7 @@ if st.session_state.logged_in:
 
         except Exception as e:
             st.error(f"Error retrieving data.")
+            st.exception(e)
             
     if "df" in st.session_state:
         df = st.session_state["df"]
