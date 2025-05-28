@@ -84,7 +84,7 @@ def get_user_data(email):
         return user_data
     except Exception as e:
         st.error("Error identifying user.")
-        #st.exception(e)
+        st.exception(e)
         return None
 
 # ------------------------------
