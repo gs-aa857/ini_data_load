@@ -32,7 +32,7 @@ st.title("Initiative EE Data Downloader")
 # ------------------------------
 # Snowflake Connection (secrets stored in .streamlit/secrets.toml)
 # ------------------------------
-@st.cache_resource(show_spinner=False)
+#@st.cache_resource(show_spinner=False)
 def get_connection():
     try:
         
@@ -278,3 +278,4 @@ if st.session_state.logged_in:
                 file_name=f"{selected_view}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
+
