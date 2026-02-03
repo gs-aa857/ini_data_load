@@ -1,4 +1,4 @@
-streamlit==1.42.2
+streamlit==1.53.1
 snowflake-connector-python==3.13.2
 pandas==2.2.3
 matplotlib==3.9.2
