@@ -137,8 +137,8 @@ def subtract_month(date):
 # ------------------------------
 
 # Load secrets
-users = st.secrets.get("users", {})
-views = st.secrets.get("views", {})
+# users = st.secrets.get("users", {})
+# views = st.secrets.get("views", {})
 
 # Initialize session state
 if "logged_in" not in st.session_state:
@@ -278,4 +278,5 @@ if st.session_state.logged_in:
                 file_name=f"{selected_view}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
+
 
