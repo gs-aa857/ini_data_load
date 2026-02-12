@@ -118,19 +118,27 @@ def get_user_views(email):
 # ------------------------------
 # Substract one month using datetime
 # ------------------------------
-def subtract_month(date):
-    # Determine the new month and year
-    new_month = date.month - 1
-    new_year = date.year if new_month > 0 else date.year - 1
-    new_month = new_month if new_month > 0 else 12  # Handle January going to December
+def subtract_month(source_date):
+    # 1. Calculate the target year and month
+    month = source_date.month - 1
+    year = source_date.year
+    if month == 0:
+        month = 12
+        year -= 1
 
-    # Get the last day of the new month
-    last_day_of_new_month = (datetime.datetime(new_year, new_month + 1, 1) - datetime.timedelta(days=1)).day
+    # 2. Find the last day of the target month safely
+    # We look at the 1st of the month AFTER our target, then subtract 1 day
+    next_month = month % 12 + 1
+    next_month_year = year if month < 12 else year + 1
+    
+    last_day_of_new_month = (
+        datetime.datetime(next_month_year, next_month, 1) - datetime.timedelta(days=1)
+    ).day
 
-    # Adjust the day if the original day is greater than the last day of the new month
-    new_day = min(date.day, last_day_of_new_month)
+    # 3. Clip the day to the maximum allowed in the new month
+    day = min(source_date.day, last_day_of_new_month)
 
-    return datetime.datetime(new_year, new_month, new_day)
+    return datetime.datetime(year, month, day)
 
 # ------------------------------
 # login Interface
@@ -278,5 +286,6 @@ if st.session_state.logged_in:
                 file_name=f"{selected_view}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
+
 
 
