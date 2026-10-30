@@ -1,291 +1,343 @@
-import streamlit as st
-import snowflake.connector
-import pandas as pd
+import calendar
 import datetime
-import time
+import hmac
 import io
+import logging
+import re
+import time
+
+import bcrypt
+import pandas as pd
+import snowflake.connector
+from snowflake.connector import errors as sf_errors
+import streamlit as st
 
 # ------------------------------
-# Set page config and apply dark theme styling
+# Logging: errors go to the Streamlit Cloud log, users see a short message
 # ------------------------------
-#st.set_page_config(page_title="Initiative Data Downloader")
-# Basic dark theme CSS for the Streamlit app
-st.markdown(
-    """
-    <style>
-    .reportview-container {
-        background-color: #1e1e1e;
-        color: #ffffff;
-    }
-    .sidebar .sidebar-content {
-        background-color: #1e1e1e;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
+log = logging.getLogger("ini_data_load")
 
-st.image("Initiative_RGB_Blue.png", use_container_width=True)
+# ------------------------------
+# Settings
+# ------------------------------
+SF = st.secrets["snowflake"]
+SCHEMA = SF["schema"]
+DATABASE = SF["database"]
+
+EXCEL_MAX_ROWS = 1_048_575   # Excel sheet limit (1,048,576) minus the header row
+EXCEL_SOFT_LIMIT = 100_000   # above this, default to CSV because Excel generation is slow
+SESSION_EXPIRED_ERRNO = 390114  # Snowflake "authentication token has expired"
+
+# ------------------------------
+# Page header
+# ------------------------------
+st.image("Initiative_RGB_Blue.png", width="stretch")
 st.title("Initiative EE Data Downloader")
 
 
 # ------------------------------
-# Snowflake Connection (secrets stored in .streamlit/secrets.toml)
+# Snowflake connection (secrets stored in .streamlit/secrets.toml)
+# One shared connection, reused across reruns instead of a new one per call.
 # ------------------------------
-#@st.cache_resource(show_spinner=False)
+@st.cache_resource(show_spinner=False)
+def _connect():
+    # Raises on failure, so a failed connection is never cached.
+    return snowflake.connector.connect(
+        user=SF["user"],
+        account=SF["account"],
+        warehouse=SF["warehouse"],
+        database=SF["database"],
+        private_key=SF["private_key"],
+        client_session_keep_alive=True,
+    )
+
+
 def get_connection():
-    try:
-        
-        return snowflake.connector.connect(
-            user=st.secrets["snowflake"]["user"],
-            #password=st.secrets["snowflake"]["password"],
-            account=st.secrets["snowflake"]["account"],
-            warehouse=st.secrets["snowflake"]["warehouse"],
-            database=st.secrets["snowflake"]["database"],
-            #schema=st.secrets["snowflake"]["schema"],
-            private_key=st.secrets["snowflake"]["private_key"]
-        )
-    except Exception as e:
-        st.error("Failed to connect to database.")
-        #st.exception(e)
-        return None
-    
-# ------------------------------
-# Log query execution and errors
-# ------------------------------
-def log_query(user_id, view_id, start_date, end_date, number_of_rows, query_duration):
-    try:
+    conn = _connect()
+    if conn.is_closed():
+        _connect.clear()
+        conn = _connect()
+    return conn
+
+
+def run_query(sql, params=None, fetch="all"):
+    """Run a parameterised query. Reconnects once if the session has dropped.
+
+    fetch: "all" -> list of rows, "one" -> single row, "df" -> DataFrame, None -> nothing
+    """
+    for attempt in (1, 2):
         conn = get_connection()
-        query = f"""
-        INSERT INTO {st.secrets['snowflake']['schema']}.USER_LOGS (user_id, view_id, action_timestamp, start_date, end_date, number_of_rows, query_duration)
-        VALUES (%s, %s, CURRENT_TIMESTAMP(), %s, %s, %s, %s);
-        """
-        cursor = conn.cursor()
-        cursor.execute(query, (user_id, view_id, start_date, end_date, number_of_rows, query_duration))
-        conn.commit()
-        cursor.close()
-    except Exception as e:
-        st.error("Error accessing database.")
-        #st.exception(e)    
-        
-# ------------------------------
-# Get user data from Snowflake
-# ------------------------------
-def get_user_data(email):
-    try:
-        conn = get_connection()
-        query = f"""
-        SELECT user_id, password FROM {st.secrets['snowflake']['schema']}.USERS WHERE username = '{email}'
-        """
-        cursor = conn.cursor()
-        cursor.execute(query)
-        user_data = cursor.fetchone()
-        cursor.close()
-        return user_data
-    except Exception as e:
-        st.error("Error identifying user.")
-        #st.exception(e)
-        return None
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                if fetch == "one":
+                    return cur.fetchone()
+                if fetch == "all":
+                    return cur.fetchall()
+                if fetch == "df":
+                    columns = [c[0] for c in cur.description]
+                    # coerce_float matches the old pd.read_sql behaviour (NUMBER -> float)
+                    return pd.DataFrame.from_records(cur.fetchall(), columns=columns, coerce_float=True)
+                return None
+        except sf_errors.Error as e:
+            retryable = isinstance(e, (sf_errors.OperationalError, sf_errors.InterfaceError)) or (
+                getattr(e, "errno", None) == SESSION_EXPIRED_ERRNO
+            )
+            if attempt == 2 or not retryable:
+                raise
+            log.warning("Snowflake connection problem, reconnecting", exc_info=True)
+            _connect.clear()
+
 
 # ------------------------------
-# Get user data from Snowflake
+# Users, passwords and views
 # ------------------------------
+def get_user(email):
+    """Returns (user_id, stored_password) or None if the user does not exist."""
+    return run_query(
+        f"SELECT user_id, password FROM {SCHEMA}.USERS WHERE LOWER(username) = %s",
+        (email,),
+        fetch="one",
+    )
+
+
+def verify_password(stored, given):
+    """Accepts bcrypt hashes; falls back to plain-text comparison for passwords not yet migrated."""
+    if not stored or not given:
+        return False
+    if stored.startswith(("$2a$", "$2b$", "$2y$")):
+        return bcrypt.checkpw(given.encode("utf-8"), stored.encode("utf-8"))
+    return hmac.compare_digest(stored.encode("utf-8"), given.encode("utf-8"))
+
+
+@st.cache_data(ttl=600, show_spinner=False)
 def get_user_views(email):
-    try:
-        conn = get_connection()
-        query = f"""
-        SELECT VIEWS.view_name, VIEWS.view_id, CONCAT(VIEWS.SCHEMA_NAME,'.',VIEWS.DB_VIEW_NAME) AS address
-        FROM {st.secrets['snowflake']['schema']}.USER_VIEWS 
-        JOIN {st.secrets['snowflake']['schema']}.USERS ON USER_VIEWS.user_id = USERS.user_id
-        JOIN {st.secrets['snowflake']['schema']}.VIEWS ON USER_VIEWS.view_id = VIEWS.view_id
+    """Returns {view_name: (view_id, schema.view)} for the views this user may access."""
+    rows = run_query(
+        f"""
+        SELECT VIEWS.view_name, VIEWS.view_id, CONCAT(VIEWS.SCHEMA_NAME, '.', VIEWS.DB_VIEW_NAME) AS address
+        FROM {SCHEMA}.USER_VIEWS
+        JOIN {SCHEMA}.USERS ON USER_VIEWS.user_id = USERS.user_id
+        JOIN {SCHEMA}.VIEWS ON USER_VIEWS.view_id = VIEWS.view_id
         WHERE LOWER(USERS.username) = %s
-        """
-        cursor = conn.cursor()
-        cursor.execute(query, email)
-        views = cursor.fetchall()
-        cursor.close()
+        ORDER BY VIEWS.view_name
+        """,
+        (email,),
+    )
+    return {name: (view_id, address) for name, view_id, address in rows}
 
-        if views:
-            return {view[0]: [view[1],view[2]] for view in views}  # {view_name: address}
-        else:
-            return {}
 
-    except Exception as e:
-        st.error("Error accessing available views.")
-        #st.exception(e)
-        return {}
+def log_query(user_id, view_id, start_date, end_date, number_of_rows, query_duration):
+    """Usage logging. A failure here is logged but never shown to the user."""
+    try:
+        run_query(
+            f"""
+            INSERT INTO {SCHEMA}.USER_LOGS
+                (user_id, view_id, action_timestamp, start_date, end_date, number_of_rows, query_duration)
+            VALUES (%s, %s, CURRENT_TIMESTAMP(), %s, %s, %s, %s)
+            """,
+            (user_id, view_id, start_date, end_date, int(number_of_rows), float(query_duration)),
+            fetch=None,
+        )
+    except Exception:
+        log.exception("Failed to write usage log")
+
 
 # ------------------------------
-# Substract one month using datetime
+# Helpers
 # ------------------------------
 def subtract_month(source_date):
-    # 1. Calculate the target year and month
-    month = source_date.month - 1
-    year = source_date.year
-    if month == 0:
-        month = 12
-        year -= 1
+    """Same date one month earlier, clipped to the last day of that month."""
+    if source_date.month == 1:
+        year, month = source_date.year - 1, 12
+    else:
+        year, month = source_date.year, source_date.month - 1
+    last_day = calendar.monthrange(year, month)[1]
+    return datetime.date(year, month, min(source_date.day, last_day))
 
-    # 2. Find the last day of the target month safely
-    # We look at the 1st of the month AFTER our target, then subtract 1 day
-    next_month = month % 12 + 1
-    next_month_year = year if month < 12 else year + 1
-    
-    last_day_of_new_month = (
-        datetime.datetime(next_month_year, next_month, 1) - datetime.timedelta(days=1)
-    ).day
 
-    # 3. Clip the day to the maximum allowed in the new month
-    day = min(source_date.day, last_day_of_new_month)
+def safe_filename(text):
+    return re.sub(r"[^\w\-. ]", "_", str(text)).strip() or "data"
 
-    return datetime.datetime(year, month, day)
+
+def build_file(df, fmt):
+    if fmt == "CSV":
+        # utf-8-sig so Excel opens non-ASCII characters (õ, ä, ö, ü, š, ž) correctly
+        return df.to_csv(index=False).encode("utf-8-sig")
+
+    out = df.copy()
+    # Excel cannot store timezone-aware datetimes (Snowflake TIMESTAMP_TZ / LTZ)
+    for col in out.select_dtypes(include=["datetimetz"]).columns:
+        out[col] = out[col].dt.tz_localize(None)
+    buf = io.BytesIO()
+    with pd.ExcelWriter(buf, engine="openpyxl") as writer:
+        out.to_excel(writer, index=False, sheet_name="Data")
+    return buf.getvalue()
+
+
+def logout():
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+
 
 # ------------------------------
-# login Interface
+# Login interface
 # ------------------------------
+if not st.session_state.get("logged_in"):
+    with st.form("login"):
+        email = st.text_input("Email").strip().lower()
+        password = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Login")
 
-# Load secrets
-# users = st.secrets.get("users", {})
-# views = st.secrets.get("views", {})
-
-# Initialize session state
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
-    st.session_state.email = None
-
-# Login form
-if not st.session_state.logged_in:
-    email = (st.text_input("Email")).lower()
-    password = st.text_input("Password", type="password")
-    
-    if st.button("Login"):
+    if submitted:
         try:
-            
-            if get_user_data(email)[1] == password:
+            user = get_user(email)
+        except Exception:
+            log.exception("Login lookup failed")
+            st.error("Could not reach the database. Please try again shortly.")
+        else:
+            if user and verify_password(user[1], password):
                 st.session_state.logged_in = True
                 st.session_state.email = email
-                st.rerun()  # Refresh the app
+                st.session_state.user_id = user[0]
+                st.rerun()
             else:
                 st.error("Invalid email or password!")
-        except Exception as e:
-            st.error("Error during login.")
-            #st.exception(e)
+    st.stop()
+
 
 # ------------------------------
-# Main App Interface (after succesful login)
+# Main app interface (after successful login)
 # ------------------------------
-if st.session_state.logged_in:
-    
-    st.success(f"Welcome, {st.session_state.email}!")
+st.success(f"Welcome, {st.session_state.email}!")
+st.button("Log out", on_click=logout)
 
+try:
     user_views = get_user_views(st.session_state.email)
-    selected_view = st.selectbox("Select a View", user_views.keys())
-    
-    today = datetime.date.today()
-    last_month = today.replace(day=1) - datetime.timedelta(days=1)
-    default_start_date = subtract_month(last_month)
-    default_end_date = last_month
-    
-    # Session state to store selected dates
-    if "start_date" not in st.session_state:
-        st.session_state.start_date = default_start_date
-    if "end_date" not in st.session_state:
-        st.session_state.end_date = default_end_date
-    
-    # Display date selectors with dynamic min/max values
-    start_date = st.date_input(
-        "Select Start Date", 
-        value=st.session_state.start_date, 
-        min_value=datetime.date(2019, 1, 1), 
-        max_value=st.session_state.end_date  # Ensures start_date is not after end_date
-    )
-    
-    end_date = st.date_input(
-        "Select End Date", 
-        value=st.session_state.end_date, 
-        min_value=start_date,  # Ensures end_date is not before start_date
-        max_value=today
-    )
-    
-    # Update session state
-    st.session_state.start_date = start_date
-    st.session_state.end_date = end_date
-    
-    # Validation: Show message if selection is invalid
-    if start_date > end_date:
-        st.error("Start Date cannot be later than End Date. Please select a valid range.")
-    
-    # ------------------------------
-    # Data Retrieval Button and Query Execution
-    # ------------------------------
-    if st.button("Get Data"):
-        # Build the list of columns to retrieve: always include the hidden columns plus the user-selected ones.
-        query = f"""
+except Exception:
+    log.exception("Loading views failed")
+    st.error("Error accessing available views.")
+    st.stop()
+
+if not user_views:
+    st.info("No views are assigned to your account.")
+    st.stop()
+
+selected_view = st.selectbox("Select a View", list(user_views.keys()))
+
+today = datetime.date.today()
+default_end_date = today.replace(day=1) - datetime.timedelta(days=1)  # last day of previous month
+default_start_date = subtract_month(default_end_date)
+
+st.session_state.setdefault("start_date", default_start_date)
+st.session_state.setdefault("end_date", default_end_date)
+
+start_date = st.date_input(
+    "Select Start Date",
+    value=st.session_state.start_date,
+    min_value=datetime.date(2019, 1, 1),
+    max_value=st.session_state.end_date,  # start cannot be after end
+)
+end_date = st.date_input(
+    "Select End Date",
+    value=st.session_state.end_date,
+    min_value=start_date,  # end cannot be before start
+    max_value=today,
+)
+st.session_state.start_date = start_date
+st.session_state.end_date = end_date
+
+invalid_range = start_date > end_date
+if invalid_range:
+    st.error("Start Date cannot be later than End Date. Please select a valid range.")
+
+# ------------------------------
+# Data retrieval
+# ------------------------------
+if st.button("Get Data", disabled=invalid_range):
+    view_id, address = user_views[selected_view]
+    query = f"""
         SELECT *
-        FROM {st.secrets['snowflake']['database']}.{user_views[selected_view][1]}
-        WHERE TO_DATE(AD_DATE, 'DD.MM.YYYY') BETWEEN '{start_date}' AND '{end_date}'
-        ORDER BY TO_DATE(AD_DATE, 'DD.MM.YYYY')
-        """
-        try:
-            with st.spinner("Querying Database..."):
-                conn = get_connection()
-                start_time = time.time()  # Start before query submission
-                df = pd.read_sql(query, conn)
-                end_time = time.time()
-            
-            # Store the DataFrame in session state to prevent re-querying
-            st.session_state["df"] = df
-            
-            st.success("Data retrieved successfully!")
-            
-            # Log query details to the database
-            log_query(
-                user_id=get_user_data(st.session_state.email)[0],
-                view_id=user_views[selected_view][0],
-                start_date=start_date,
-                end_date=end_date,
-                query_duration=end_time - start_time,
-                number_of_rows=df.shape[0]
-            )
+        FROM {DATABASE}.{address}
+        WHERE TRY_TO_DATE(AD_DATE, 'DD.MM.YYYY') BETWEEN %s AND %s
+        ORDER BY TRY_TO_DATE(AD_DATE, 'DD.MM.YYYY')
+    """
+    st.session_state.pop("result", None)
+    try:
+        with st.spinner("Querying Database..."):
+            t0 = time.time()
+            df = run_query(query, (start_date, end_date), fetch="df")
+            duration = time.time() - t0
+    except Exception:
+        log.exception("Data query failed (view_id=%s, %s to %s)", view_id, start_date, end_date)
+        st.error("Error retrieving data.")
+    else:
+        st.session_state.result = {
+            "df": df,
+            "view": selected_view,
+            "start": start_date,
+            "end": end_date,
+            "file": None,  # (format, bytes), built once and reused across reruns
+        }
+        st.success(f"Data retrieved successfully! {len(df):,} rows.")
+        log_query(
+            user_id=st.session_state.user_id,
+            view_id=view_id,
+            start_date=start_date,
+            end_date=end_date,
+            number_of_rows=len(df),
+            query_duration=duration,
+        )
 
-        except Exception as e:
-            st.error(f"Error retrieving data.")
-            #st.exception(e)
-            
-    if "df" in st.session_state:
-        df = st.session_state["df"]
-        
-        st.dataframe(df.head(100))
-        
-        # ------------------------------
-        # Download Format Selection: CSV or Excel
-        # ------------------------------
-        download_format = st.radio(f"Select Download Format{'' if df.shape[0] < 100000 else ' (generating Excel for large datasets can take time)'}", options=["Excel", "CSV"], index= 0 if df.shape[0] < 100000 else 1)
-        
-        if download_format == "CSV":
-            with st.spinner("Generating CSV file..."):
-                csv_data = df.to_csv(index=False).encode('utf-8')
-            st.download_button(
-                label="Download as CSV",
-                data=csv_data,
-                file_name=f"{selected_view}.csv",
-                mime="text/csv"
-            )
-            
+# ------------------------------
+# Preview and download
+# ------------------------------
+result = st.session_state.get("result")
+if result:
+    df = result["df"]
+    n_rows = len(df)
+    st.caption(
+        f"{result['view']}, {result['start']} to {result['end']}: {n_rows:,} rows"
+        + (" (preview shows the first 100)" if n_rows > 100 else "")
+    )
+    st.dataframe(df.head(100), width="stretch")
+
+    if n_rows == 0:
+        st.info("No rows for the selected period.")
+    else:
+        if n_rows > EXCEL_MAX_ROWS:
+            options, note = ["CSV"], " (too many rows for Excel)"
+        elif n_rows >= EXCEL_SOFT_LIMIT:
+            options, note = ["Excel", "CSV"], " (generating Excel for large datasets can take time)"
         else:
-            # Write DataFrame to an in-memory Excel file
-            with st.spinner("Generating Excel file..."):
-                towrite = io.BytesIO()
-                with pd.ExcelWriter(towrite, engine="openpyxl") as writer:  # Use openpyxl instead of xlsxwriter
-                    df.to_excel(writer, index=False, sheet_name="WeatherData")
- 
-            towrite.seek(0)
-            st.download_button(
-                label="Download as Excel",
-                data=towrite,
-                file_name=f"{selected_view}.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            options, note = ["Excel", "CSV"], ""
+        default_index = 0 if n_rows < EXCEL_SOFT_LIMIT else len(options) - 1
+
+        fmt = st.radio(f"Select Download Format{note}", options, index=default_index, horizontal=True)
+
+        # Build the file only when the format changes, not on every rerun
+        if result["file"] is None or result["file"][0] != fmt:
+            with st.spinner(f"Generating {fmt} file..."):
+                try:
+                    result["file"] = (fmt, build_file(df, fmt))
+                except Exception:
+                    log.exception("Building %s file failed", fmt)
+                    st.error(f"Could not generate the {fmt} file.")
+
+        if result["file"] and result["file"][0] == fmt:
+            ext, mime = (
+                ("csv", "text/csv")
+                if fmt == "CSV"
+                else ("xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
             )
-
-
-
+            st.download_button(
+                label=f"Download as {fmt}",
+                data=result["file"][1],
+                file_name=f"{safe_filename(result['view'])}_{result['start']}_{result['end']}.{ext}",
+                mime=mime,
+                on_click="ignore",  # downloading does not rerun the app
+            )
